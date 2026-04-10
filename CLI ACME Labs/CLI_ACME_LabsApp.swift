@@ -11,7 +11,11 @@ import SwiftUI
 struct CLI_ACME_LabsApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            TerminalView()
+                .frame(minWidth: 800, minHeight: 600)
         }
+        #if os(macOS)
+        .windowStyle(.hiddenTitleBar)
+        #endif
     }
 }
