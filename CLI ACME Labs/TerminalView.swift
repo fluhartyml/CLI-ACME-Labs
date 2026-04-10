@@ -30,9 +30,31 @@ struct TerminalView: View {
     @State var showPinnedPane = false
 
     // Bottom pane — full conversation (like Claude Code terminal)
-    @State var conversationText = "CLI ACME Labs v1.0\nType /login to authenticate, /setup to choose your developer folder.\n\n"
+    @State var conversationText = "CLI ACME Labs v1.0\nType /setup to choose your workspace folder, then /login to authenticate.\n\n"
 
     @FocusState private var inputFocused: Bool
+    @State var showCommandPicker = false
+    @State var selectedCommandIndex = 0
+
+    private let commands: [(name: String, description: String)] = [
+        ("/login", "Set your Anthropic API key"),
+        ("/setup", "Choose your workspace folder"),
+        ("/status", "Show auth and memory status"),
+        ("/view", "Display a file in production pane"),
+        ("/pin", "Pin a file to the reference pane"),
+        ("/unpin", "Close the reference pane"),
+        ("/clear", "Clear all panes"),
+        ("/clear production", "Clear production pane only"),
+        ("/help", "Show all commands"),
+    ]
+
+    private var filteredCommands: [(name: String, description: String)] {
+        if inputText == "/" {
+            return commands
+        }
+        let query = inputText.lowercased()
+        return commands.filter { $0.name.lowercased().hasPrefix(query) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -70,7 +92,39 @@ struct TerminalView: View {
 
             Divider().background(Color.green.opacity(0.5))
 
-            // Top pane — Production view (document/file editor with line numbers)
+            // Top pane — Pinned reference (roadmap, notes, etc.)
+            if showPinnedPane {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        Text(pinnedTitle)
+                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.cyan.opacity(0.6))
+                        Spacer()
+                        Button(action: { unpinPane() }) {
+                            Image(systemName: "xmark.circle")
+                                .foregroundStyle(.cyan.opacity(0.5))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 4)
+                    .background(Color.cyan.opacity(0.1))
+
+                    ScrollView([.vertical, .horizontal]) {
+                        Text(pinnedText)
+                            .font(.system(size: 18, design: .monospaced))
+                            .foregroundStyle(.cyan)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                    }
+                    .background(Color.black)
+                }
+
+                Divider().background(Color.cyan.opacity(0.5))
+            }
+
+            // Middle pane — Production view (document/file editor with line numbers)
             VStack(alignment: .leading, spacing: 0) {
                 // Production pane title bar
                 HStack {
@@ -107,38 +161,6 @@ struct TerminalView: View {
 
             Divider().background(Color.green.opacity(0.5))
 
-            // Middle pane — Pinned reference (roadmap, notes, etc.)
-            if showPinnedPane {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack {
-                        Text(pinnedTitle)
-                            .font(.system(size: 14, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.cyan.opacity(0.6))
-                        Spacer()
-                        Button(action: { unpinPane() }) {
-                            Image(systemName: "xmark.circle")
-                                .foregroundStyle(.cyan.opacity(0.5))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal)
-                    .padding(.vertical, 4)
-                    .background(Color.cyan.opacity(0.1))
-
-                    ScrollView([.vertical, .horizontal]) {
-                        Text(pinnedText)
-                            .font(.system(size: 18, design: .monospaced))
-                            .foregroundStyle(.cyan)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding()
-                    }
-                    .background(Color.black)
-                }
-
-                Divider().background(Color.cyan.opacity(0.5))
-            }
-
             // Bottom pane — Interactive conversation (like Claude Code)
             VStack(alignment: .leading, spacing: 0) {
                 ScrollViewReader { proxy in
@@ -170,6 +192,12 @@ struct TerminalView: View {
                     }
                 }
 
+                // Command picker popup
+                if showCommandPicker && !filteredCommands.isEmpty {
+                    CommandPickerView(commands: filteredCommands,
+                                     selectedIndex: selectedCommandIndex)
+                }
+
                 HStack(spacing: 4) {
                     Text(">")
                         .font(.system(size: 18, weight: .bold, design: .monospaced))
@@ -180,9 +208,52 @@ struct TerminalView: View {
                         .foregroundStyle(.green)
                         .textFieldStyle(.plain)
                         .focused($inputFocused)
-                        .onSubmit {
-                            handleInput()
+                        .onChange(of: inputText) {
+                            if inputText.hasPrefix("/") && !inputText.contains(" ") {
+                                showCommandPicker = true
+                                selectedCommandIndex = 0
+                            } else {
+                                showCommandPicker = false
+                            }
                         }
+                        .onSubmit {
+                            if showCommandPicker && !filteredCommands.isEmpty {
+                                inputText = filteredCommands[selectedCommandIndex].name
+                                showCommandPicker = false
+                                // Add space for commands that take arguments
+                                if ["/view", "/pin"].contains(inputText) {
+                                    inputText += " "
+                                } else {
+                                    handleInput()
+                                }
+                            } else {
+                                handleInput()
+                            }
+                        }
+                        #if os(macOS)
+                        .onKeyPress(.upArrow) {
+                            if showCommandPicker {
+                                selectedCommandIndex = max(0, selectedCommandIndex - 1)
+                                return .handled
+                            }
+                            return .ignored
+                        }
+                        .onKeyPress(.downArrow) {
+                            if showCommandPicker {
+                                selectedCommandIndex = min(filteredCommands.count - 1, selectedCommandIndex + 1)
+                                return .handled
+                            }
+                            return .ignored
+                        }
+                        .onKeyPress(.escape) {
+                            if showCommandPicker {
+                                showCommandPicker = false
+                                inputText = ""
+                                return .handled
+                            }
+                            return .ignored
+                        }
+                        #endif
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
