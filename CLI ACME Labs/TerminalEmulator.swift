@@ -36,19 +36,18 @@ class TerminalEmulator {
         // Set up the process
         process = Process()
         process?.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process?.arguments = ["--no-monitor"]
+        process?.arguments = ["--no-monitor", "--no-globalrcs"]
 
         // Build environment with claude in PATH
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "dumb"
         env["LANG"] = "en_US.UTF-8"
+        env["HOME"] = NSHomeDirectory()
         let home = NSHomeDirectory()
-        let extraPaths = "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin"
-        if let existingPath = env["PATH"] {
-            env["PATH"] = "\(extraPaths):\(existingPath)"
-        } else {
-            env["PATH"] = extraPaths
-        }
+        // Use the full system PATH plus user-local paths
+        let basePath = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        let userPaths = "\(home)/.local/bin:\(home)/.claude/plugins/cache/claude-plugins-official/swift-lsp/1.0.0/bin"
+        env["PATH"] = "\(userPaths):\(basePath)"
         process?.environment = env
 
         if let dir = workingDirectory {
