@@ -13,7 +13,7 @@ struct TerminalView: View {
     @State var memory = MemoryManager()
     @State var inputText = ""
     @State var showingFolderPicker = false
-    @State var showingLoginPrompt = false
+    // login removed — Claude Code handles auth
     @State var showingWakeUpConfirm = false
     @State var showingSafeExitConfirm = false
     @State var isShuttingDown = false  // Safe Exit state: waiting for tomorrow's plans
@@ -37,9 +37,8 @@ struct TerminalView: View {
     @State var selectedCommandIndex = 0
 
     private let commands: [(name: String, description: String)] = [
-        ("/login", "Authenticate with Anthropic"),
         ("/setup", "Choose your developer folder"),
-        ("/status", "Show auth and memory status"),
+        ("/status", "Show connection and memory status"),
         ("/view", "Display a file in production pane"),
         ("/pin", "Pin a file to the reference pane"),
         ("/unpin", "Close the reference pane"),
@@ -265,17 +264,22 @@ struct TerminalView: View {
         .onAppear {
             inputFocused = true
             memory.loadFromBookmark()
-            if let key = KeychainHelper.load() {
-                claude.configure(apiKey: key, systemPrompt: buildSystemPrompt())
+
+            // Set up Claude Code output routing
+            claude.onConversation = { text in
+                appendConversation("Claude: \(text)\n")
             }
-        }
-        .sheet(isPresented: $showingLoginPrompt) {
-            LoginView(onSave: { key in
-                KeychainHelper.save(apiKey: key)
-                claude.configure(apiKey: key, systemPrompt: buildSystemPrompt())
-                appendConversation("Claude: Authenticated. API key saved to Keychain.\n\n")
-                showingLoginPrompt = false
-            })
+            claude.onProduction = { content, title in
+                productionTitle = title ?? "Output"
+                setProduction(content)
+            }
+
+            // Check if Claude Code is available
+            if claude.isConfigured {
+                appendConversation("Claude Code found. Ready.\n\n")
+            } else {
+                appendConversation("Claude Code not found. Install with: npm install -g @anthropic-ai/claude-code\n\n")
+            }
         }
         .fileImporter(isPresented: $showingFolderPicker,
                       allowedContentTypes: [.folder]) { result in
@@ -309,39 +313,23 @@ struct TerminalView: View {
             return
         }
 
-        // Send to Claude
+        // Send to Claude Code
         guard claude.isConfigured else {
-            appendConversation("Claude: Not authenticated. Type /login first.\n\n")
+            appendConversation("Claude Code not found. Install with: npm install -g @anthropic-ai/claude-code\n\n")
             return
         }
 
-        Task {
-            if let parsed = await claude.send(input) {
-                // Conversation goes to bottom pane
-                appendConversation("Claude: \(parsed.conversation)\n\n")
-
-                // Production goes to top pane
-                if let production = parsed.production {
-                    productionTitle = parsed.productionTitle ?? "Output"
-                    setProduction(production)
-                }
-            }
-            if let error = claude.error {
-                appendConversation("Error: \(error)\n\n")
-            }
-        }
+        claude.send(input)
     }
 
     private func handleCommand(_ command: String) {
         switch command.lowercased() {
-        case "/login":
-            showingLoginPrompt = true
         case "/setup":
             showingFolderPicker = true
         case "/status":
-            let authStatus = claude.isConfigured ? "Authenticated" : "Not authenticated"
+            let claudeStatus = claude.isConfigured ? "Claude Code found" : "Claude Code not found"
             let memStatus = memory.isConfigured ? "Configured (\(memory.rootPath?.path ?? ""))" : "Not configured"
-            appendConversation("Auth: \(authStatus)\nMemory: \(memStatus)\n\n")
+            appendConversation("Claude: \(claudeStatus)\nMemory: \(memStatus)\n\n")
         case "/clear":
             setProduction("")
             productionTitle = "Production"
@@ -354,14 +342,13 @@ struct TerminalView: View {
         case "/help":
             appendConversation("""
             Commands:
-              /login             — Set your Anthropic API key
               /setup             — Choose your developer folder
-              /status            — Show auth and memory status
+              /status            — Show connection and memory status
               /clear             — Clear all panes
               /clear production  — Clear production pane only
               /view <file>       — Display a file in the production pane
-              /pin <file>        — Pin a file to the middle reference pane
-              /unpin             — Close the middle pane
+              /pin <file>        — Pin a file to the reference pane
+              /unpin             — Close the reference pane
               /help              — Show this help
             \n
             """)
@@ -439,43 +426,6 @@ struct TerminalView: View {
         productionLineCount = text.components(separatedBy: "\n").count
     }
 
-    // MARK: - System Prompt
-
-    private func buildSystemPrompt() -> String {
-        var prompt = """
-        You are Claude, running inside CLI ACME Labs — a terminal-style interface with two panes.
-
-        BOTTOM PANE (conversation): Everything you say to the human appears here. Questions, answers, \
-        discussion, confirmations, status updates. This is your voice talking to them.
-
-        TOP PANE (production): When you produce a file, document, chapter, code, diff, or build output, \
-        wrap it in production tags:
-
-        <<<PRODUCTION title="filename.swift">>>
-        ... file content here ...
-        <<<END_PRODUCTION>>>
-
-        The production pane has line numbers. The human will reference line numbers when requesting edits \
-        (e.g. "line 42 is wrong, change it to X"). When you edit, produce the updated file and the production \
-        pane will show a diff with green additions and red removals.
-
-        Alternatively, code fences (```filename) also route to the production pane.
-
-        RULES:
-        - Conversation text goes to the bottom pane. Never wrap conversation in production tags.
-        - File content, documents, code, and structured output go to the top pane via production tags.
-        - Be direct, concise, and helpful. Use plain language.
-        - You have persistent memory stored in the user's developer folder.
-        """
-
-        if let chatHistory = memory.chatHistoryPath,
-           let content = memory.readFile(chatHistory) {
-            prompt += "\n\nRecent chat history:\n\(content)"
-        }
-
-        return prompt
-    }
-
     // MARK: - Routines
 
     private func runWakeUp() {
@@ -502,10 +452,6 @@ struct TerminalView: View {
         }
 
         appendConversation("Wake-up complete. Ready to work.\n\n")
-
-        if claude.isConfigured {
-            claude.configure(apiKey: KeychainHelper.load() ?? "", systemPrompt: buildSystemPrompt())
-        }
     }
 
     private func runSafeExit() {

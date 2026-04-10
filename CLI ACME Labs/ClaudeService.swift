@@ -4,6 +4,10 @@
 //
 //  Created by Michael Fluharty on 4/10/26.
 //
+//  Spawns Claude Code as a subprocess. CLI ACME Labs is the terminal,
+//  Claude Code is the engine. Authentication uses the user's existing
+//  Claude Code session — no API key needed.
+//
 
 import Foundation
 
@@ -21,177 +25,199 @@ struct ClaudeMessage: Codable, Identifiable {
     }
 }
 
-/// Parsed response split into conversation and production content
-struct ParsedResponse {
-    let conversation: String  // Goes to bottom pane (talking to the human)
-    let production: String?   // Goes to top pane (file edits, diffs, builds, tool output)
-    let productionTitle: String?
-}
-
-struct AnthropicRequest: Codable {
-    let model: String
-    let max_tokens: Int
-    let system: String
-    let messages: [MessagePayload]
-
-    struct MessagePayload: Codable {
-        let role: String
-        let content: String
-    }
-}
-
-struct AnthropicResponse: Codable {
-    let id: String
-    let content: [ContentBlock]
-    let stop_reason: String?
-
-    struct ContentBlock: Codable {
-        let type: String
-        let text: String?
-    }
-}
-
 @Observable
 class ClaudeService {
     var messages: [ClaudeMessage] = []
     var isLoading = false
     var error: String?
+    var isRunning = false
 
-    private var apiKey: String?
-    private let model = "claude-sonnet-4-6"
-    private var systemPrompt = ""
+    private var process: Process?
+    private var inputPipe: Pipe?
+    private var outputPipe: Pipe?
+    private var errorPipe: Pipe?
 
-    func configure(apiKey: String, systemPrompt: String = "") {
-        self.apiKey = apiKey
-        self.systemPrompt = systemPrompt
-    }
+    /// Callback for conversation output (bottom pane)
+    var onConversation: ((String) -> Void)?
+    /// Callback for production output (top pane)
+    var onProduction: ((String, String?) -> Void)?
 
     var isConfigured: Bool {
-        apiKey != nil && !apiKey!.isEmpty
+        // Check if claude CLI is available
+        FileManager.default.fileExists(atPath: "/usr/local/bin/claude") ||
+        FileManager.default.fileExists(atPath: "/opt/homebrew/bin/claude") ||
+        findClaude() != nil
     }
 
-    func send(_ userMessage: String) async -> ParsedResponse? {
-        guard let apiKey, !apiKey.isEmpty else {
-            error = "No API key configured. Use /login to set your key."
-            return nil
+    private func findClaude() -> String? {
+        let task = Process()
+        let pipe = Pipe()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        task.arguments = ["claude"]
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return path?.isEmpty == false ? path : nil
+    }
+
+    func start(workingDirectory: URL? = nil) {
+        guard !isRunning else { return }
+
+        let claudePath: String
+        if FileManager.default.fileExists(atPath: "/opt/homebrew/bin/claude") {
+            claudePath = "/opt/homebrew/bin/claude"
+        } else if FileManager.default.fileExists(atPath: "/usr/local/bin/claude") {
+            claudePath = "/usr/local/bin/claude"
+        } else if let found = findClaude() {
+            claudePath = found
+        } else {
+            error = "Claude Code not found. Install it with: npm install -g @anthropic-ai/claude-code"
+            return
         }
 
-        let userMsg = ClaudeMessage(role: "user", content: userMessage)
-        messages.append(userMsg)
-        isLoading = true
-        error = nil
+        process = Process()
+        inputPipe = Pipe()
+        outputPipe = Pipe()
+        errorPipe = Pipe()
 
-        let messagePayloads = messages.map {
-            AnthropicRequest.MessagePayload(role: $0.role, content: $0.content)
+        process?.executableURL = URL(fileURLWithPath: claudePath)
+        process?.arguments = ["--print"]  // Non-interactive mode, reads from stdin
+        process?.standardInput = inputPipe
+        process?.standardOutput = outputPipe
+        process?.standardError = errorPipe
+
+        if let dir = workingDirectory {
+            process?.currentDirectoryURL = dir
         }
 
-        let request = AnthropicRequest(
-            model: model,
-            max_tokens: 8192,
-            system: systemPrompt,
-            messages: messagePayloads
-        )
+        // Read stdout asynchronously
+        outputPipe?.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            if let output = String(data: data, encoding: .utf8) {
+                DispatchQueue.main.async {
+                    self?.handleOutput(output)
+                }
+            }
+        }
+
+        // Read stderr asynchronously
+        errorPipe?.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            if let output = String(data: data, encoding: .utf8) {
+                DispatchQueue.main.async {
+                    self?.onConversation?(output)
+                }
+            }
+        }
+
+        process?.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.isRunning = false
+                self?.onConversation?("\nClaude Code process ended.\n")
+            }
+        }
 
         do {
-            var urlRequest = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
-            urlRequest.httpMethod = "POST"
-            urlRequest.setValue("application/json", forHTTPHeaderField: "content-type")
-            urlRequest.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-            urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-            urlRequest.httpBody = try JSONEncoder().encode(request)
-
-            let (data, response) = try await URLSession.shared.data(for: urlRequest)
-
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw URLError(.badServerResponse)
-            }
-
-            if httpResponse.statusCode != 200 {
-                let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-                throw NSError(domain: "ClaudeService",
-                              code: httpResponse.statusCode,
-                              userInfo: [NSLocalizedDescriptionKey: "API error \(httpResponse.statusCode): \(errorBody)"])
-            }
-
-            let anthropicResponse = try JSONDecoder().decode(AnthropicResponse.self, from: data)
-            let responseText = anthropicResponse.content
-                .compactMap { $0.text }
-                .joined()
-
-            let assistantMsg = ClaudeMessage(role: "assistant", content: responseText)
-            messages.append(assistantMsg)
-
-            isLoading = false
-            return parseResponse(responseText)
+            try process?.run()
+            isRunning = true
         } catch {
-            self.error = error.localizedDescription
-            isLoading = false
-            return nil
+            self.error = "Failed to start Claude Code: \(error.localizedDescription)"
         }
     }
 
-    /// Parse Claude's response into conversation (bottom pane) and production (top pane)
-    ///
-    /// Production blocks are marked with:
-    ///   <<<PRODUCTION title="filename.swift">>>
-    ///   ... content ...
-    ///   <<<END_PRODUCTION>>>
-    ///
-    /// Everything outside production blocks is conversation.
-    func parseResponse(_ response: String) -> ParsedResponse {
-        let productionPattern = "<<<PRODUCTION(?:\\s+title=\"([^\"]*)\")?>\\>\\>\\n([\\s\\S]*?)<<<END_PRODUCTION>>>"
-
-        guard let regex = try? NSRegularExpression(pattern: productionPattern, options: []) else {
-            return ParsedResponse(conversation: response, production: nil, productionTitle: nil)
+    func send(_ message: String) {
+        guard isRunning, let inputPipe else {
+            // If not running, start a one-shot conversation
+            sendOneShot(message)
+            return
         }
 
-        let range = NSRange(response.startIndex..., in: response)
-        let matches = regex.matches(in: response, options: [], range: range)
+        let userMsg = ClaudeMessage(role: "user", content: message)
+        messages.append(userMsg)
 
-        if matches.isEmpty {
-            // No production blocks — check for code fences as fallback
-            return parseCodeFences(response)
-        }
-
-        var conversation = response
-        var productionContent = ""
-        var productionTitle: String?
-
-        // Extract production blocks (process in reverse to preserve indices)
-        for match in matches.reversed() {
-            // Get title if present
-            if match.numberOfRanges > 1,
-               let titleRange = Range(match.range(at: 1), in: response) {
-                productionTitle = String(response[titleRange])
-            }
-
-            // Get content
-            if match.numberOfRanges > 2,
-               let contentRange = Range(match.range(at: 2), in: response) {
-                productionContent = String(response[contentRange])
-            }
-
-            // Remove production block from conversation
-            if let fullRange = Range(match.range, in: conversation) {
-                conversation.removeSubrange(fullRange)
-            }
-        }
-
-        conversation = conversation.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        return ParsedResponse(
-            conversation: conversation.isEmpty ? "Done." : conversation,
-            production: productionContent.isEmpty ? nil : productionContent,
-            productionTitle: productionTitle
-        )
+        let data = (message + "\n").data(using: .utf8)!
+        inputPipe.fileHandleForWriting.write(data)
     }
 
-    /// Fallback: parse markdown code fences as production output
-    private func parseCodeFences(_ response: String) -> ParsedResponse {
+    /// One-shot mode: run claude with a single prompt and capture output
+    private func sendOneShot(_ message: String) {
+        let userMsg = ClaudeMessage(role: "user", content: message)
+        messages.append(userMsg)
+        isLoading = true
+
+        Task.detached { [weak self] in
+            let claudePath: String
+            if FileManager.default.fileExists(atPath: "/opt/homebrew/bin/claude") {
+                claudePath = "/opt/homebrew/bin/claude"
+            } else if FileManager.default.fileExists(atPath: "/usr/local/bin/claude") {
+                claudePath = "/usr/local/bin/claude"
+            } else {
+                await MainActor.run {
+                    self?.error = "Claude Code not found."
+                    self?.isLoading = false
+                }
+                return
+            }
+
+            let task = Process()
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+
+            task.executableURL = URL(fileURLWithPath: claudePath)
+            task.arguments = ["--print", message]
+            task.standardOutput = outPipe
+            task.standardError = errPipe
+
+            do {
+                try task.run()
+                task.waitUntilExit()
+
+                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outData, encoding: .utf8) ?? ""
+
+                let assistantMsg = ClaudeMessage(role: "assistant", content: output)
+
+                await MainActor.run {
+                    self?.messages.append(assistantMsg)
+                    self?.isLoading = false
+                    self?.handleOutput(output)
+                }
+            } catch {
+                await MainActor.run {
+                    self?.error = error.localizedDescription
+                    self?.isLoading = false
+                }
+            }
+        }
+    }
+
+    private func handleOutput(_ output: String) {
+        // Route output to appropriate pane
+        // Look for production markers or code fences
+        if output.contains("<<<PRODUCTION") || output.contains("```") {
+            // Has production content — parse it
+            let parsed = parseResponse(output)
+            onConversation?(parsed.conversation)
+            if let production = parsed.production {
+                onProduction?(production, parsed.productionTitle)
+            }
+        } else {
+            // All conversation
+            onConversation?(output)
+        }
+    }
+
+    func parseResponse(_ response: String) -> (conversation: String, production: String?, productionTitle: String?) {
+        // Check for code fences
         guard let fenceStart = response.range(of: "```"),
               let fenceEnd = response.range(of: "```",
                                             range: fenceStart.upperBound..<response.endIndex) else {
-            return ParsedResponse(conversation: response, production: nil, productionTitle: nil)
+            return (conversation: response, production: nil, productionTitle: nil)
         }
 
         let afterFence = fenceStart.upperBound
@@ -199,21 +225,29 @@ class ClaudeService {
         let title = String(response[afterFence..<firstNewline]).trimmingCharacters(in: .whitespaces)
         let codeContent = String(response[response.index(after: firstNewline)..<fenceEnd.lowerBound])
 
-        // Remove the code fence from conversation text
         var conversation = response
         let fullFenceRange = fenceStart.lowerBound..<fenceEnd.upperBound
         conversation.removeSubrange(fullFenceRange)
         conversation = conversation.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if codeContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return ParsedResponse(conversation: response, production: nil, productionTitle: nil)
+            return (conversation: response, production: nil, productionTitle: nil)
         }
 
-        return ParsedResponse(
-            conversation: conversation.isEmpty ? "File updated." : conversation,
+        return (
+            conversation: conversation.isEmpty ? "Done." : conversation,
             production: codeContent,
             productionTitle: title.isEmpty ? "Output" : title
         )
+    }
+
+    func stop() {
+        process?.terminate()
+        inputPipe?.fileHandleForWriting.closeFile()
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        errorPipe?.fileHandleForReading.readabilityHandler = nil
+        process = nil
+        isRunning = false
     }
 
     func clearHistory() {
