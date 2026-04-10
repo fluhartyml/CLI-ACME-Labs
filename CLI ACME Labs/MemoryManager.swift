@@ -71,7 +71,9 @@ class MemoryManager {
             fileBasePath!,
             longTermMemoryPath!,
             chatHistoriesPath!,
-            fileBasePath!.appendingPathComponent("Documents")
+            memoryBasePath!.appendingPathComponent("Human's Chat Histories"),
+            fileBasePath!.appendingPathComponent("Documents"),
+            fileBasePath!.appendingPathComponent("Screenshots")
         ]
         for dir in directories {
             try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
