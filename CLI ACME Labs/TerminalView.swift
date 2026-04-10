@@ -9,7 +9,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct TerminalView: View {
-    @State var claude = ClaudeService()
+    @State var terminal = TerminalEmulator()
     @State var memory = MemoryManager()
     @State var fileWatcher = FileWatcher()
     @State var inputText = ""
@@ -18,19 +18,16 @@ struct TerminalView: View {
     @State var showingSafeExitConfirm = false
     @State var isShuttingDown = false
 
-    // Top pane — production output (documents, files, previews)
+    // Top pane — production output (driven by productpane.md)
     @State var productionText = ""
     @State var productionTitle = "Production"
     @State var productionLineCount = 0
     @State var previousProductionText = ""
 
-    // Middle pane — pinned reference (roadmap, notes, etc.)
+    // Middle pane — pinned reference (driven by pinnedpane.md)
     @State var pinnedText = ""
     @State var pinnedTitle = ""
     @State var showPinnedPane = false
-
-    // Bottom pane — full conversation (like Claude Code terminal)
-    @State var conversationText = "CLI ACME Labs v1.0\nType /setup to choose your developer folder, then /login to authenticate.\n\n"
 
     @FocusState private var inputFocused: Bool
     @State var showCommandPicker = false
@@ -160,33 +157,22 @@ struct TerminalView: View {
 
             Divider().background(Color.green.opacity(0.5))
 
-            // Bottom pane — Interactive conversation (like Claude Code)
+            // Bottom pane — Real terminal (zsh)
             VStack(alignment: .leading, spacing: 0) {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        Text(conversationText)
+                        Text(terminal.output)
                             .font(.system(size: 18, design: .monospaced))
                             .foregroundStyle(.green)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding()
-                            .id("conversationBottom")
-
-                        if claude.isLoading {
-                            HStack(spacing: 8) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("Claude is thinking...")
-                                    .font(.system(size: 18, design: .monospaced))
-                                    .foregroundStyle(.green.opacity(0.6))
-                            }
-                            .padding(.horizontal)
-                        }
+                            .id("terminalBottom")
                     }
                     .background(Color.black)
-                    .onChange(of: conversationText) {
+                    .onChange(of: terminal.output) {
                         withAnimation {
-                            proxy.scrollTo("conversationBottom", anchor: .bottom)
+                            proxy.scrollTo("terminalBottom", anchor: .bottom)
                         }
                     }
                 }
@@ -219,7 +205,6 @@ struct TerminalView: View {
                             if showCommandPicker && !filteredCommands.isEmpty {
                                 inputText = filteredCommands[selectedCommandIndex].name
                                 showCommandPicker = false
-                                // Add space for commands that take arguments
                                 if ["/view", "/pin"].contains(inputText) {
                                     inputText += " "
                                 } else {
@@ -265,13 +250,7 @@ struct TerminalView: View {
             inputFocused = true
             memory.loadFromBookmark()
             startFileWatchers()
-
-            // Check if Claude Code is available
-            if claude.isConfigured {
-                appendConversation("Claude Code found. Ready.\n\n")
-            } else {
-                appendConversation("Claude Code not found. Install with: npm install -g @anthropic-ai/claude-code\n\n")
-            }
+            terminal.start()
         }
         .fileImporter(isPresented: $showingFolderPicker,
                       allowedContentTypes: [.folder]) { result in
@@ -279,7 +258,7 @@ struct TerminalView: View {
                 memory.saveBookmark(for: url)
                 memory.configure(developerFolder: url)
                 startFileWatchers()
-                appendConversation("Claude: Developer folder set: \(url.path)\nclaude.Memory structure created.\n\n")
+                appendTerminal("Claude: Developer folder set: \(url.path)\nclaude.Memory structure created.\n\n")
             }
         }
     }
@@ -291,28 +270,20 @@ struct TerminalView: View {
         guard !input.isEmpty else { return }
         inputText = ""
 
-        // Echo input to conversation
-        appendConversation("You: \(input)\n\n")
-
         // If shutting down, this input is tomorrow's plans
         if isShuttingDown {
             completeSafeExit(tomorrowsPlans: input)
             return
         }
 
-        // Handle commands
+        // Handle ACME Labs commands
         if input.hasPrefix("/") {
             handleCommand(input)
             return
         }
 
-        // Send to Claude Code
-        guard claude.isConfigured else {
-            appendConversation("Claude Code not found. Install with: npm install -g @anthropic-ai/claude-code\n\n")
-            return
-        }
-
-        claude.send(input)
+        // Send to the shell (zsh, claude, ssh, whatever is running)
+        terminal.sendLine(input)
     }
 
     private func handleCommand(_ command: String) {
@@ -320,20 +291,20 @@ struct TerminalView: View {
         case "/setup":
             showingFolderPicker = true
         case "/status":
-            let claudeStatus = claude.isConfigured ? "Claude Code found" : "Claude Code not found"
+            let shellStatus = terminal.isRunning ? "Shell running" : "Shell not running"
             let memStatus = memory.isConfigured ? "Configured (\(memory.rootPath?.path ?? ""))" : "Not configured"
-            appendConversation("Claude: \(claudeStatus)\nMemory: \(memStatus)\n\n")
+            terminal.output += "Status:\n  Shell: \(shellStatus)\n  Memory: \(memStatus)\n\n"
         case "/clear":
             setProduction("")
             productionTitle = "Production"
-            conversationText = ""
+            terminal.clear()
         case "/clear production":
             setProduction("")
             productionTitle = "Production"
         case "/unpin":
             unpinPane()
         case "/help":
-            appendConversation("""
+            appendTerminal("""
             Commands:
               /setup             — Choose your developer folder
               /status            — Show connection and memory status
@@ -353,7 +324,7 @@ struct TerminalView: View {
                 let filename = String(command.dropFirst(5)).trimmingCharacters(in: .whitespaces)
                 pinFile(filename)
             } else {
-                appendConversation("Unknown command: \(command)\nType /help for available commands.\n\n")
+                appendTerminal("Unknown command: \(command)\nType /help for available commands.\n\n")
             }
         }
     }
@@ -363,7 +334,7 @@ struct TerminalView: View {
     /// Display a file from the memory structure in the production pane
     private func viewFile(_ filename: String) {
         guard memory.isConfigured else {
-            appendConversation("Memory not configured. Run /setup first.\n\n")
+            appendTerminal("Memory not configured. Run /setup first.\n\n")
             return
         }
         guard let memoryPath = memory.memoryBasePath?.deletingLastPathComponent() else { return }
@@ -372,9 +343,9 @@ struct TerminalView: View {
         if let content = memory.readFile(filePath) {
             productionTitle = filename
             setProduction(content)
-            appendConversation("Displaying \(filename) in production pane.\n\n")
+            appendTerminal("Displaying \(filename) in production pane.\n\n")
         } else {
-            appendConversation("File not found: \(filename)\n\n")
+            appendTerminal("File not found: \(filename)\n\n")
         }
     }
 
@@ -382,7 +353,7 @@ struct TerminalView: View {
 
     private func pinFile(_ filename: String) {
         guard memory.isConfigured else {
-            appendConversation("Memory not configured. Run /setup first.\n\n")
+            appendTerminal("Memory not configured. Run /setup first.\n\n")
             return
         }
         guard let memoryPath = memory.memoryBasePath?.deletingLastPathComponent() else { return }
@@ -392,9 +363,9 @@ struct TerminalView: View {
             pinnedTitle = filename
             pinnedText = content
             showPinnedPane = true
-            appendConversation("Pinned \(filename) to reference pane.\n\n")
+            appendTerminal("Pinned \(filename) to reference pane.\n\n")
         } else {
-            appendConversation("File not found: \(filename)\n\n")
+            appendTerminal("File not found: \(filename)\n\n")
         }
     }
 
@@ -402,14 +373,14 @@ struct TerminalView: View {
         showPinnedPane = false
         pinnedText = ""
         pinnedTitle = ""
-        appendConversation("Reference pane closed.\n\n")
+        appendTerminal("Reference pane closed.\n\n")
     }
 
     // MARK: - Output
 
-    /// Conversation pane — bottom
-    private func appendConversation(_ text: String) {
-        conversationText += text
+    /// Terminal output — bottom pane
+    private func appendTerminal(_ text: String) {
+        terminal.output += text
     }
 
     /// Set production pane — saves previous for diff, then replaces
@@ -450,60 +421,62 @@ struct TerminalView: View {
 
     private func runWakeUp() {
         guard memory.isConfigured else {
-            appendConversation("Claude: Memory not configured. Run /setup first.\n\n")
+            appendTerminal("Claude: Memory not configured. Run /setup first.\n\n")
             return
         }
-        appendConversation("--- Wake-Up Routine ---\n")
+        appendTerminal("--- Wake-Up Routine ---\n")
 
         if let path = memory.helloClaudePath, let _ = memory.readFile(path) {
-            appendConversation("Read hello-claude.md\n")
+            appendTerminal("Read hello-claude.md\n")
         }
 
         if let path = memory.morningNotesPath, let notes = memory.readFile(path) {
             productionTitle = "MORNING-NOTES.md"
             setProduction(notes)
-            appendConversation("MORNING-NOTES displayed in production pane.\n")
+            appendTerminal("MORNING-NOTES displayed in production pane.\n")
         } else {
-            appendConversation("No MORNING-NOTES.md found.\n")
+            appendTerminal("No MORNING-NOTES.md found.\n")
         }
 
         if let path = memory.chatHistoryPath, let _ = memory.readFile(path) {
-            appendConversation("Chat-History loaded.\n")
+            appendTerminal("Chat-History loaded.\n")
         }
 
-        appendConversation("Wake-up complete. Ready to work.\n\n")
+        appendTerminal("Wake-up complete. Ready to work.\n\n")
     }
 
     private func runSafeExit() {
         guard memory.isConfigured else {
-            appendConversation("Claude: Memory not configured — session not saved.\n\n")
+            appendTerminal("Claude: Memory not configured — session not saved.\n\n")
             return
         }
 
-        appendConversation("--- Safe Exit Routine ---\n\n")
-        appendConversation("Claude: What are your plans for tomorrow?\n\n")
+        appendTerminal("--- Safe Exit Routine ---\n\n")
+        appendTerminal("Claude: What are your plans for tomorrow?\n\n")
         isShuttingDown = true
     }
 
     private func completeSafeExit(tomorrowsPlans: String) {
         isShuttingDown = false
 
-        // Save transcript to session folder
+        // Save terminal output as transcript
         if let sessionFolder = memory.currentSessionFolder() {
-            memory.saveTranscript(claude.messages, to: sessionFolder)
-            appendConversation("Transcript saved to \(sessionFolder.lastPathComponent)/\n")
+            let transcriptURL = sessionFolder.appendingPathComponent("transcript.md")
+            memory.writeFile(transcriptURL, content: terminal.output)
+            appendTerminal("Transcript saved to \(sessionFolder.lastPathComponent)/\n")
         }
 
         // Update Chat-History
         if let chatPath = memory.chatHistoryPath {
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy MMM dd HHmm"
-            let entry = "\n### [\(formatter.string(from: .now))] Session ended\n- \(claude.messages.count) messages exchanged\n"
+            let lineCount = terminal.output.components(separatedBy: "\n").count
+            let entry = "\n### [\(formatter.string(from: .now))] Session ended\n- \(lineCount) lines of terminal output\n"
             if var existing = memory.readFile(chatPath) {
                 existing += entry
                 memory.writeFile(chatPath, content: existing)
             }
-            appendConversation("Chat-History updated.\n")
+            appendTerminal("Chat-History updated.\n")
         }
 
         // Write MORNING-NOTES with tomorrow's plans
@@ -517,22 +490,18 @@ struct TerminalView: View {
             notes += "## Plans for Today\n\n"
             notes += tomorrowsPlans + "\n\n"
 
-            // Add active session summary
             notes += "## Previous Session Summary\n\n"
-            notes += "- \(claude.messages.count) messages exchanged\n"
-
             let sessionFormatter = DateFormatter()
             sessionFormatter.dateFormat = "yyyy MMM dd HHmm"
             notes += "- Session ended: \(sessionFormatter.string(from: .now))\n"
 
             memory.writeFile(morningPath, content: notes)
-            appendConversation("MORNING-NOTES written for tomorrow.\n")
+            appendTerminal("MORNING-NOTES written for tomorrow.\n")
 
-            // Show the notes in production pane
             productionTitle = "MORNING-NOTES.md"
             setProduction(notes)
         }
 
-        appendConversation("\nSession saved. Safe to close.\n\n")
+        appendTerminal("\nSession saved. Safe to close.\n\n")
     }
 }

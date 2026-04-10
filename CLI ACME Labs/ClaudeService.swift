@@ -43,10 +43,21 @@ class ClaudeService {
     var onProduction: ((String, String?) -> Void)?
 
     var isConfigured: Bool {
-        // Check if claude CLI is available
-        FileManager.default.fileExists(atPath: "/usr/local/bin/claude") ||
-        FileManager.default.fileExists(atPath: "/opt/homebrew/bin/claude") ||
-        findClaude() != nil
+        resolveClaude() != nil
+    }
+
+    private func resolveClaude() -> String? {
+        let paths = [
+            "\(NSHomeDirectory())/.local/bin/claude",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude"
+        ]
+        for path in paths {
+            if FileManager.default.fileExists(atPath: path) {
+                return path
+            }
+        }
+        return findClaude()
     }
 
     private func findClaude() -> String? {
@@ -66,14 +77,7 @@ class ClaudeService {
     func start(workingDirectory: URL? = nil) {
         guard !isRunning else { return }
 
-        let claudePath: String
-        if FileManager.default.fileExists(atPath: "/opt/homebrew/bin/claude") {
-            claudePath = "/opt/homebrew/bin/claude"
-        } else if FileManager.default.fileExists(atPath: "/usr/local/bin/claude") {
-            claudePath = "/usr/local/bin/claude"
-        } else if let found = findClaude() {
-            claudePath = found
-        } else {
+        guard let claudePath = resolveClaude() else {
             error = "Claude Code not found. Install it with: npm install -g @anthropic-ai/claude-code"
             return
         }
@@ -151,12 +155,12 @@ class ClaudeService {
         isLoading = true
 
         Task.detached { [weak self] in
-            let claudePath: String
-            if FileManager.default.fileExists(atPath: "/opt/homebrew/bin/claude") {
-                claudePath = "/opt/homebrew/bin/claude"
-            } else if FileManager.default.fileExists(atPath: "/usr/local/bin/claude") {
-                claudePath = "/usr/local/bin/claude"
-            } else {
+            let paths = [
+                "\(NSHomeDirectory())/.local/bin/claude",
+                "/opt/homebrew/bin/claude",
+                "/usr/local/bin/claude"
+            ]
+            guard let claudePath = paths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
                 await MainActor.run {
                     self?.error = "Claude Code not found."
                     self?.isLoading = false
