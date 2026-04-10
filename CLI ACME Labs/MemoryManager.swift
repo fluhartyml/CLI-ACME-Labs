@@ -22,6 +22,8 @@ class MemoryManager {
     var morningNotesPath: URL? { memoryPath?.appendingPathComponent("MORNING-NOTES.md") }
     var longTermMemoryPath: URL? { memoryBasePath?.appendingPathComponent("Long-Term-Memory") }
     var chatHistoriesPath: URL? { memoryBasePath?.appendingPathComponent("Chat-Histories") }
+    var productPanePath: URL? { memoryPath?.appendingPathComponent("productpane.md") }
+    var pinnedPanePath: URL? { memoryPath?.appendingPathComponent("pinnedpane.md") }
 
     func configure(developerFolder: URL) {
         _ = developerFolder.startAccessingSecurityScopedResource()
@@ -100,6 +102,13 @@ class MemoryManager {
         if let chatPath = chatHistoryPath, !fileManager.fileExists(atPath: chatPath.path) {
             let content = "# Chat History\n\nNo sessions yet.\n"
             try? content.write(to: chatPath, atomically: true, encoding: .utf8)
+        }
+        // Create drop files if they don't exist
+        if let productPath = productPanePath, !fileManager.fileExists(atPath: productPath.path) {
+            try? "".write(to: productPath, atomically: true, encoding: .utf8)
+        }
+        if let pinnedPath = pinnedPanePath, !fileManager.fileExists(atPath: pinnedPath.path) {
+            try? "".write(to: pinnedPath, atomically: true, encoding: .utf8)
         }
     }
 

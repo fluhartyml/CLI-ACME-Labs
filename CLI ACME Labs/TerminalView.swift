@@ -11,12 +11,12 @@ import UniformTypeIdentifiers
 struct TerminalView: View {
     @State var claude = ClaudeService()
     @State var memory = MemoryManager()
+    @State var fileWatcher = FileWatcher()
     @State var inputText = ""
     @State var showingFolderPicker = false
-    // login removed — Claude Code handles auth
     @State var showingWakeUpConfirm = false
     @State var showingSafeExitConfirm = false
-    @State var isShuttingDown = false  // Safe Exit state: waiting for tomorrow's plans
+    @State var isShuttingDown = false
 
     // Top pane — production output (documents, files, previews)
     @State var productionText = ""
@@ -264,15 +264,7 @@ struct TerminalView: View {
         .onAppear {
             inputFocused = true
             memory.loadFromBookmark()
-
-            // Set up Claude Code output routing
-            claude.onConversation = { text in
-                appendConversation("Claude: \(text)\n")
-            }
-            claude.onProduction = { content, title in
-                productionTitle = title ?? "Output"
-                setProduction(content)
-            }
+            startFileWatchers()
 
             // Check if Claude Code is available
             if claude.isConfigured {
@@ -286,6 +278,7 @@ struct TerminalView: View {
             if case .success(let url) = result {
                 memory.saveBookmark(for: url)
                 memory.configure(developerFolder: url)
+                startFileWatchers()
                 appendConversation("Claude: Developer folder set: \(url.path)\nclaude.Memory structure created.\n\n")
             }
         }
@@ -424,6 +417,33 @@ struct TerminalView: View {
         previousProductionText = productionText
         productionText = text
         productionLineCount = text.components(separatedBy: "\n").count
+    }
+
+    // MARK: - File Watchers
+
+    private func startFileWatchers() {
+        guard memory.isConfigured else { return }
+
+        // Watch productpane.md — drives the production pane
+        if let productPath = memory.productPanePath {
+            fileWatcher.watch(productPath) { content in
+                productionTitle = "productpane.md"
+                setProduction(content)
+            }
+        }
+
+        // Watch pinnedpane.md — drives the pinned reference pane
+        if let pinnedPath = memory.pinnedPanePath {
+            fileWatcher.watch(pinnedPath) { content in
+                if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    showPinnedPane = false
+                } else {
+                    pinnedTitle = "pinnedpane.md"
+                    pinnedText = content
+                    showPinnedPane = true
+                }
+            }
+        }
     }
 
     // MARK: - Routines
