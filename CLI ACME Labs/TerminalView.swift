@@ -24,6 +24,11 @@ struct TerminalView: View {
     @State var productionLineCount = 0
     @State var previousProductionText = ""
 
+    // Middle pane — pinned reference (roadmap, notes, etc.)
+    @State var pinnedText = ""
+    @State var pinnedTitle = ""
+    @State var showPinnedPane = false
+
     // Bottom pane — full conversation (like Claude Code terminal)
     @State var conversationText = "CLI ACME Labs v1.0\nType /login to authenticate, /setup to choose your developer folder.\n\n"
 
@@ -101,6 +106,38 @@ struct TerminalView: View {
             }
 
             Divider().background(Color.green.opacity(0.5))
+
+            // Middle pane — Pinned reference (roadmap, notes, etc.)
+            if showPinnedPane {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        Text(pinnedTitle)
+                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.cyan.opacity(0.6))
+                        Spacer()
+                        Button(action: { unpinPane() }) {
+                            Image(systemName: "xmark.circle")
+                                .foregroundStyle(.cyan.opacity(0.5))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 4)
+                    .background(Color.cyan.opacity(0.1))
+
+                    ScrollView([.vertical, .horizontal]) {
+                        Text(pinnedText)
+                            .font(.system(size: 18, design: .monospaced))
+                            .foregroundStyle(.cyan)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                    }
+                    .background(Color.black)
+                }
+
+                Divider().background(Color.cyan.opacity(0.5))
+            }
 
             // Bottom pane — Interactive conversation (like Claude Code)
             VStack(alignment: .leading, spacing: 0) {
@@ -241,15 +278,19 @@ struct TerminalView: View {
         case "/clear production":
             setProduction("")
             productionTitle = "Production"
+        case "/unpin":
+            unpinPane()
         case "/help":
             appendConversation("""
             Commands:
               /login             — Set your Anthropic API key
               /setup             — Choose your developer folder
               /status            — Show auth and memory status
-              /clear             — Clear both panes
+              /clear             — Clear all panes
               /clear production  — Clear production pane only
               /view <file>       — Display a file in the production pane
+              /pin <file>        — Pin a file to the middle reference pane
+              /unpin             — Close the middle pane
               /help              — Show this help
             \n
             """)
@@ -257,6 +298,9 @@ struct TerminalView: View {
             if command.lowercased().hasPrefix("/view ") {
                 let filename = String(command.dropFirst(6)).trimmingCharacters(in: .whitespaces)
                 viewFile(filename)
+            } else if command.lowercased().hasPrefix("/pin ") {
+                let filename = String(command.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                pinFile(filename)
             } else {
                 appendConversation("Unknown command: \(command)\nType /help for available commands.\n\n")
             }
@@ -281,6 +325,33 @@ struct TerminalView: View {
         } else {
             appendConversation("File not found: \(filename)\n\n")
         }
+    }
+
+    // MARK: - Pinned Pane
+
+    private func pinFile(_ filename: String) {
+        guard memory.isConfigured else {
+            appendConversation("Memory not configured. Run /setup first.\n\n")
+            return
+        }
+        guard let memoryPath = memory.memoryBasePath?.deletingLastPathComponent() else { return }
+
+        let filePath = memoryPath.appendingPathComponent(filename)
+        if let content = memory.readFile(filePath) {
+            pinnedTitle = filename
+            pinnedText = content
+            showPinnedPane = true
+            appendConversation("Pinned \(filename) to reference pane.\n\n")
+        } else {
+            appendConversation("File not found: \(filename)\n\n")
+        }
+    }
+
+    private func unpinPane() {
+        showPinnedPane = false
+        pinnedText = ""
+        pinnedTitle = ""
+        appendConversation("Reference pane closed.\n\n")
     }
 
     // MARK: - Output
