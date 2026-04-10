@@ -36,16 +36,20 @@ class TerminalEmulator {
         // Set up the process
         process = Process()
         process?.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process?.arguments = ["--login"]
-        process?.environment = ProcessInfo.processInfo.environment
-        process?.environment?["TERM"] = "xterm-256color"
-        process?.environment?["LANG"] = "en_US.UTF-8"
+        process?.arguments = ["--no-monitor"]
 
-        // Add ~/.local/bin to PATH for claude
-        if var path = process?.environment?["PATH"] {
-            path = "\(NSHomeDirectory())/.local/bin:" + path
-            process?.environment?["PATH"] = path
+        // Build environment with claude in PATH
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = "dumb"
+        env["LANG"] = "en_US.UTF-8"
+        let home = NSHomeDirectory()
+        let extraPaths = "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin"
+        if let existingPath = env["PATH"] {
+            env["PATH"] = "\(extraPaths):\(existingPath)"
+        } else {
+            env["PATH"] = extraPaths
         }
+        process?.environment = env
 
         if let dir = workingDirectory {
             process?.currentDirectoryURL = URL(fileURLWithPath: dir)
@@ -132,9 +136,9 @@ class TerminalEmulator {
 
     /// Strip ANSI escape codes for clean text display
     private func stripAnsiCodes(_ text: String) -> String {
-        // Remove CSI sequences (ESC [ ... letter)
+        // Remove CSI sequences (ESC [ ... letter/tilde)
         var result = text
-        while let range = result.range(of: "\u{1B}\\[[0-9;]*[A-Za-z]", options: .regularExpression) {
+        while let range = result.range(of: "\u{1B}\\[[0-9;?]*[A-Za-z~]", options: .regularExpression) {
             result.removeSubrange(range)
         }
         // Remove OSC sequences (ESC ] ... BEL or ST)
@@ -148,6 +152,8 @@ class TerminalEmulator {
         while let range = result.range(of: "\u{1B}[()][AB012]", options: .regularExpression) {
             result.removeSubrange(range)
         }
+        // Remove carriage returns
+        result = result.replacingOccurrences(of: "\r", with: "")
         return result
     }
 
