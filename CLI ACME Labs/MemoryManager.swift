@@ -24,6 +24,7 @@ class MemoryManager {
     var chatHistoriesPath: URL? { memoryBasePath?.appendingPathComponent("Chat-Histories") }
 
     func configure(developerFolder: URL) {
+        _ = developerFolder.startAccessingSecurityScopedResource()
         self.rootPath = developerFolder
         createStructure()
     }
