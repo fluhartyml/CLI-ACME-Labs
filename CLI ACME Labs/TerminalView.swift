@@ -30,15 +30,15 @@ struct TerminalView: View {
     @State var showPinnedPane = false
 
     // Bottom pane — full conversation (like Claude Code terminal)
-    @State var conversationText = "CLI ACME Labs v1.0\nType /setup to choose your workspace folder, then /login to authenticate.\n\n"
+    @State var conversationText = "CLI ACME Labs v1.0\nType /setup to choose your developer folder, then /login to authenticate.\n\n"
 
     @FocusState private var inputFocused: Bool
     @State var showCommandPicker = false
     @State var selectedCommandIndex = 0
 
     private let commands: [(name: String, description: String)] = [
-        ("/login", "Set your Anthropic API key"),
-        ("/setup", "Choose your workspace folder"),
+        ("/login", "Authenticate with Anthropic"),
+        ("/setup", "Choose your developer folder"),
         ("/status", "Show auth and memory status"),
         ("/view", "Display a file in production pane"),
         ("/pin", "Pin a file to the reference pane"),

@@ -31,21 +31,35 @@ class MemoryManager {
     func loadFromBookmark() {
         if let data = UserDefaults.standard.data(forKey: "developerFolderBookmark") {
             var isStale = false
+            #if os(macOS)
             if let url = try? URL(resolvingBookmarkData: data,
                                   options: .withSecurityScope,
                                   bookmarkDataIsStale: &isStale),
                url.startAccessingSecurityScopedResource() {
                 self.rootPath = url
             }
+            #else
+            if let url = try? URL(resolvingBookmarkData: data,
+                                  bookmarkDataIsStale: &isStale) {
+                self.rootPath = url
+            }
+            #endif
         }
     }
 
     func saveBookmark(for url: URL) {
+        #if os(macOS)
         if let data = try? url.bookmarkData(options: .withSecurityScope,
                                             includingResourceValuesForKeys: nil,
                                             relativeTo: nil) {
             UserDefaults.standard.set(data, forKey: "developerFolderBookmark")
         }
+        #else
+        if let data = try? url.bookmarkData(includingResourceValuesForKeys: nil,
+                                            relativeTo: nil) {
+            UserDefaults.standard.set(data, forKey: "developerFolderBookmark")
+        }
+        #endif
     }
 
     private func createStructure() {
