@@ -21,6 +21,13 @@ struct ClaudeMessage: Codable, Identifiable {
     }
 }
 
+/// Parsed response split into conversation and production content
+struct ParsedResponse {
+    let conversation: String  // Goes to bottom pane (talking to the human)
+    let production: String?   // Goes to top pane (file edits, diffs, builds, tool output)
+    let productionTitle: String?
+}
+
 struct AnthropicRequest: Codable {
     let model: String
     let max_tokens: Int
@@ -63,10 +70,10 @@ class ClaudeService {
         apiKey != nil && !apiKey!.isEmpty
     }
 
-    func send(_ userMessage: String) async {
+    func send(_ userMessage: String) async -> ParsedResponse? {
         guard let apiKey, !apiKey.isEmpty else {
             error = "No API key configured. Use /login to set your key."
-            return
+            return nil
         }
 
         let userMsg = ClaudeMessage(role: "user", content: userMessage)
@@ -113,11 +120,100 @@ class ClaudeService {
 
             let assistantMsg = ClaudeMessage(role: "assistant", content: responseText)
             messages.append(assistantMsg)
+
+            isLoading = false
+            return parseResponse(responseText)
         } catch {
             self.error = error.localizedDescription
+            isLoading = false
+            return nil
+        }
+    }
+
+    /// Parse Claude's response into conversation (bottom pane) and production (top pane)
+    ///
+    /// Production blocks are marked with:
+    ///   <<<PRODUCTION title="filename.swift">>>
+    ///   ... content ...
+    ///   <<<END_PRODUCTION>>>
+    ///
+    /// Everything outside production blocks is conversation.
+    func parseResponse(_ response: String) -> ParsedResponse {
+        let productionPattern = "<<<PRODUCTION(?:\\s+title=\"([^\"]*)\")?>\\>\\>\\n([\\s\\S]*?)<<<END_PRODUCTION>>>"
+
+        guard let regex = try? NSRegularExpression(pattern: productionPattern, options: []) else {
+            return ParsedResponse(conversation: response, production: nil, productionTitle: nil)
         }
 
-        isLoading = false
+        let range = NSRange(response.startIndex..., in: response)
+        let matches = regex.matches(in: response, options: [], range: range)
+
+        if matches.isEmpty {
+            // No production blocks — check for code fences as fallback
+            return parseCodeFences(response)
+        }
+
+        var conversation = response
+        var productionContent = ""
+        var productionTitle: String?
+
+        // Extract production blocks (process in reverse to preserve indices)
+        for match in matches.reversed() {
+            // Get title if present
+            if match.numberOfRanges > 1,
+               let titleRange = Range(match.range(at: 1), in: response) {
+                productionTitle = String(response[titleRange])
+            }
+
+            // Get content
+            if match.numberOfRanges > 2,
+               let contentRange = Range(match.range(at: 2), in: response) {
+                productionContent = String(response[contentRange])
+            }
+
+            // Remove production block from conversation
+            if let fullRange = Range(match.range, in: conversation) {
+                conversation.removeSubrange(fullRange)
+            }
+        }
+
+        conversation = conversation.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return ParsedResponse(
+            conversation: conversation.isEmpty ? "Done." : conversation,
+            production: productionContent.isEmpty ? nil : productionContent,
+            productionTitle: productionTitle
+        )
+    }
+
+    /// Fallback: parse markdown code fences as production output
+    private func parseCodeFences(_ response: String) -> ParsedResponse {
+        guard let fenceStart = response.range(of: "```"),
+              let fenceEnd = response.range(of: "```",
+                                            range: fenceStart.upperBound..<response.endIndex) else {
+            return ParsedResponse(conversation: response, production: nil, productionTitle: nil)
+        }
+
+        let afterFence = fenceStart.upperBound
+        let firstNewline = response[afterFence...].firstIndex(of: "\n") ?? fenceEnd.lowerBound
+        let title = String(response[afterFence..<firstNewline]).trimmingCharacters(in: .whitespaces)
+        let codeContent = String(response[response.index(after: firstNewline)..<fenceEnd.lowerBound])
+
+        // Remove the code fence from conversation text
+        var conversation = response
+        let fullFenceRange = fenceStart.lowerBound..<fenceEnd.upperBound
+        conversation.removeSubrange(fullFenceRange)
+        conversation = conversation.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if codeContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return ParsedResponse(conversation: response, production: nil, productionTitle: nil)
+        }
+
+        return ParsedResponse(
+            conversation: conversation.isEmpty ? "File updated." : conversation,
+            production: codeContent,
+            productionTitle: title.isEmpty ? "Output" : title
+        )
     }
 
     func clearHistory() {

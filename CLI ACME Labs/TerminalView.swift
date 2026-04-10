@@ -16,7 +16,15 @@ struct TerminalView: View {
     @State var showingLoginPrompt = false
     @State var showingWakeUpConfirm = false
     @State var showingSafeExitConfirm = false
-    @State var teletypeText = "CLI ACME Labs v1.0\nType /login to authenticate, /setup to choose your developer folder.\n\n"
+
+    // Top pane — production output (documents, files, previews)
+    @State var productionText = ""
+    @State var productionTitle = "Production"
+    @State var productionLineCount = 0
+    @State var previousProductionText = ""
+
+    // Bottom pane — full conversation (like Claude Code terminal)
+    @State var conversationText = "CLI ACME Labs v1.0\nType /login to authenticate, /setup to choose your developer folder.\n\n"
 
     @FocusState private var inputFocused: Bool
 
@@ -56,49 +64,73 @@ struct TerminalView: View {
 
             Divider().background(Color.green.opacity(0.5))
 
-            // Teletype pane — scrolling output
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(teletypeText)
-                        .font(.system(size: 18, design: .monospaced))
-                        .foregroundStyle(.green)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
-                        .id("teletypeBottom")
-                }
-                .background(Color.black)
-                .onChange(of: teletypeText) {
-                    withAnimation {
-                        proxy.scrollTo("teletypeBottom", anchor: .bottom)
+            // Top pane — Production view (document/file editor with line numbers)
+            VStack(alignment: .leading, spacing: 0) {
+                // Production pane title bar
+                HStack {
+                    Text(productionTitle)
+                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.green.opacity(0.6))
+                    Spacer()
+                    if productionLineCount > 0 {
+                        Text("\(productionLineCount) lines")
+                            .font(.system(size: 14, design: .monospaced))
+                            .foregroundStyle(.green.opacity(0.4))
                     }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 4)
+                .background(Color.green.opacity(0.1))
+
+                if productionText.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 32))
+                            .foregroundStyle(.green.opacity(0.2))
+                        Text("Production output will appear here.")
+                            .font(.system(size: 18, design: .monospaced))
+                            .foregroundStyle(.green.opacity(0.3))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+                } else {
+                    ProductionPaneView(text: productionText,
+                                      previousText: previousProductionText)
                 }
             }
 
             Divider().background(Color.green.opacity(0.5))
 
-            // Terminal pane — interactive input
+            // Bottom pane — Interactive conversation (like Claude Code)
             VStack(alignment: .leading, spacing: 0) {
-                ScrollView {
-                    if claude.isLoading {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Claude is thinking...")
-                                .font(.system(size: 18, design: .monospaced))
-                                .foregroundStyle(.green.opacity(0.6))
-                        }
-                        .padding()
-                    }
-
-                    if let error = claude.error {
-                        Text("Error: \(error)")
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(conversationText)
                             .font(.system(size: 18, design: .monospaced))
-                            .foregroundStyle(.red)
+                            .foregroundStyle(.green)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .padding()
+                            .id("conversationBottom")
+
+                        if claude.isLoading {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Claude is thinking...")
+                                    .font(.system(size: 18, design: .monospaced))
+                                    .foregroundStyle(.green.opacity(0.6))
+                            }
+                            .padding(.horizontal)
+                        }
+                    }
+                    .background(Color.black)
+                    .onChange(of: conversationText) {
+                        withAnimation {
+                            proxy.scrollTo("conversationBottom", anchor: .bottom)
+                        }
                     }
                 }
-                .frame(maxHeight: .infinity)
-                .background(Color.black)
 
                 HStack(spacing: 4) {
                     Text(">")
@@ -132,7 +164,7 @@ struct TerminalView: View {
             LoginView(onSave: { key in
                 KeychainHelper.save(apiKey: key)
                 claude.configure(apiKey: key, systemPrompt: buildSystemPrompt())
-                appendTeletype("Authenticated. API key saved to Keychain.\n")
+                appendConversation("Claude: Authenticated. API key saved to Keychain.\n\n")
                 showingLoginPrompt = false
             })
         }
@@ -141,18 +173,20 @@ struct TerminalView: View {
             if case .success(let url) = result {
                 memory.saveBookmark(for: url)
                 memory.configure(developerFolder: url)
-                appendTeletype("Developer folder set: \(url.path)\nclaude.Memory structure created.\n")
+                appendConversation("Claude: Developer folder set: \(url.path)\nclaude.Memory structure created.\n\n")
             }
         }
     }
+
+    // MARK: - Input Handling
 
     private func handleInput() {
         let input = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else { return }
         inputText = ""
 
-        // Echo input to teletype
-        appendTeletype("> \(input)\n")
+        // Echo input to conversation
+        appendConversation("You: \(input)\n\n")
 
         // Handle commands
         if input.hasPrefix("/") {
@@ -162,17 +196,23 @@ struct TerminalView: View {
 
         // Send to Claude
         guard claude.isConfigured else {
-            appendTeletype("Not authenticated. Type /login first.\n")
+            appendConversation("Claude: Not authenticated. Type /login first.\n\n")
             return
         }
 
         Task {
-            await claude.send(input)
-            if let lastMessage = claude.messages.last, lastMessage.role == "assistant" {
-                appendTeletype("\nClaude:\n\(lastMessage.content)\n\n")
+            if let parsed = await claude.send(input) {
+                // Conversation goes to bottom pane
+                appendConversation("Claude: \(parsed.conversation)\n\n")
+
+                // Production goes to top pane
+                if let production = parsed.production {
+                    productionTitle = parsed.productionTitle ?? "Output"
+                    setProduction(production)
+                }
             }
             if let error = claude.error {
-                appendTeletype("Error: \(error)\n")
+                appendConversation("Error: \(error)\n\n")
             }
         }
     }
@@ -186,34 +226,99 @@ struct TerminalView: View {
         case "/status":
             let authStatus = claude.isConfigured ? "Authenticated" : "Not authenticated"
             let memStatus = memory.isConfigured ? "Configured (\(memory.rootPath?.path ?? ""))" : "Not configured"
-            appendTeletype("Auth: \(authStatus)\nMemory: \(memStatus)\n")
+            appendConversation("Auth: \(authStatus)\nMemory: \(memStatus)\n\n")
         case "/clear":
-            teletypeText = ""
+            setProduction("")
+            productionTitle = "Production"
+            conversationText = ""
+        case "/clear production":
+            setProduction("")
+            productionTitle = "Production"
         case "/help":
-            appendTeletype("""
+            appendConversation("""
             Commands:
-              /login    — Set your Anthropic API key
-              /setup    — Choose your developer folder
-              /status   — Show auth and memory status
-              /clear    — Clear the teletype
-              /help     — Show this help
+              /login             — Set your Anthropic API key
+              /setup             — Choose your developer folder
+              /status            — Show auth and memory status
+              /clear             — Clear both panes
+              /clear production  — Clear production pane only
+              /view <file>       — Display a file in the production pane
+              /help              — Show this help
             \n
             """)
         default:
-            appendTeletype("Unknown command: \(command)\nType /help for available commands.\n")
+            if command.lowercased().hasPrefix("/view ") {
+                let filename = String(command.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                viewFile(filename)
+            } else {
+                appendConversation("Unknown command: \(command)\nType /help for available commands.\n\n")
+            }
         }
     }
 
-    private func appendTeletype(_ text: String) {
-        teletypeText += text
+    // MARK: - Production Pane
+
+    /// Display a file from the memory structure in the production pane
+    private func viewFile(_ filename: String) {
+        guard memory.isConfigured else {
+            appendConversation("Memory not configured. Run /setup first.\n\n")
+            return
+        }
+        guard let memoryPath = memory.memoryBasePath?.deletingLastPathComponent() else { return }
+
+        let filePath = memoryPath.appendingPathComponent(filename)
+        if let content = memory.readFile(filePath) {
+            productionTitle = filename
+            setProduction(content)
+            appendConversation("Displaying \(filename) in production pane.\n\n")
+        } else {
+            appendConversation("File not found: \(filename)\n\n")
+        }
     }
 
-    private func buildSystemPrompt() -> String {
-        var prompt = "You are Claude, running inside CLI ACME Labs — a terminal-style interface. "
-        prompt += "You have persistent memory stored in the user's developer folder. "
-        prompt += "Be direct, concise, and helpful. Use plain language."
+    // MARK: - Output
 
-        // Load memory context if available
+    /// Conversation pane — bottom
+    private func appendConversation(_ text: String) {
+        conversationText += text
+    }
+
+    /// Set production pane — saves previous for diff, then replaces
+    private func setProduction(_ text: String) {
+        previousProductionText = productionText
+        productionText = text
+        productionLineCount = text.components(separatedBy: "\n").count
+    }
+
+    // MARK: - System Prompt
+
+    private func buildSystemPrompt() -> String {
+        var prompt = """
+        You are Claude, running inside CLI ACME Labs — a terminal-style interface with two panes.
+
+        BOTTOM PANE (conversation): Everything you say to the human appears here. Questions, answers, \
+        discussion, confirmations, status updates. This is your voice talking to them.
+
+        TOP PANE (production): When you produce a file, document, chapter, code, diff, or build output, \
+        wrap it in production tags:
+
+        <<<PRODUCTION title="filename.swift">>>
+        ... file content here ...
+        <<<END_PRODUCTION>>>
+
+        The production pane has line numbers. The human will reference line numbers when requesting edits \
+        (e.g. "line 42 is wrong, change it to X"). When you edit, produce the updated file and the production \
+        pane will show a diff with green additions and red removals.
+
+        Alternatively, code fences (```filename) also route to the production pane.
+
+        RULES:
+        - Conversation text goes to the bottom pane. Never wrap conversation in production tags.
+        - File content, documents, code, and structured output go to the top pane via production tags.
+        - Be direct, concise, and helpful. Use plain language.
+        - You have persistent memory stored in the user's developer folder.
+        """
+
         if let chatHistory = memory.chatHistoryPath,
            let content = memory.readFile(chatHistory) {
             prompt += "\n\nRecent chat history:\n\(content)"
@@ -222,49 +327,47 @@ struct TerminalView: View {
         return prompt
     }
 
+    // MARK: - Routines
+
     private func runWakeUp() {
         guard memory.isConfigured else {
-            appendTeletype("Memory not configured. Run /setup first.\n")
+            appendConversation("Claude: Memory not configured. Run /setup first.\n\n")
             return
         }
-        appendTeletype("--- Wake-Up Routine ---\n")
+        appendConversation("--- Wake-Up Routine ---\n")
 
-        // Read hello-claude
         if let path = memory.helloClaudePath, let _ = memory.readFile(path) {
-            appendTeletype("Read hello-claude.md\n")
+            appendConversation("Read hello-claude.md\n")
         }
 
-        // Read MORNING-NOTES
         if let path = memory.morningNotesPath, let notes = memory.readFile(path) {
-            appendTeletype("MORNING-NOTES:\n\(notes)\n\n")
+            productionTitle = "MORNING-NOTES.md"
+            setProduction(notes)
+            appendConversation("MORNING-NOTES displayed in production pane.\n")
         } else {
-            appendTeletype("No MORNING-NOTES.md found.\n")
+            appendConversation("No MORNING-NOTES.md found.\n")
         }
 
-        // Read Chat-History
         if let path = memory.chatHistoryPath, let _ = memory.readFile(path) {
-            appendTeletype("Chat-History loaded.\n")
+            appendConversation("Chat-History loaded.\n")
         }
 
-        appendTeletype("Wake-up complete. Ready to work.\n\n")
+        appendConversation("Wake-up complete. Ready to work.\n\n")
 
-        // Send context to Claude
         if claude.isConfigured {
             claude.configure(apiKey: KeychainHelper.load() ?? "", systemPrompt: buildSystemPrompt())
         }
     }
 
     private func runSafeExit() {
-        appendTeletype("--- Safe Exit Routine ---\n")
+        appendConversation("--- Safe Exit Routine ---\n")
 
         if memory.isConfigured {
-            // Save transcript
             if let sessionFolder = memory.currentSessionFolder() {
                 memory.saveTranscript(claude.messages, to: sessionFolder)
-                appendTeletype("Transcript saved to \(sessionFolder.lastPathComponent)/\n")
+                appendConversation("Transcript saved to \(sessionFolder.lastPathComponent)/\n")
             }
 
-            // Update Chat-History
             if let chatPath = memory.chatHistoryPath {
                 let formatter = DateFormatter()
                 formatter.dateFormat = "yyyy MMM dd HHmm"
@@ -273,12 +376,12 @@ struct TerminalView: View {
                     existing += entry
                     memory.writeFile(chatPath, content: existing)
                 }
-                appendTeletype("Chat-History updated.\n")
+                appendConversation("Chat-History updated.\n")
             }
 
-            appendTeletype("Session saved. Safe to close.\n")
+            appendConversation("Session saved. Safe to close.\n\n")
         } else {
-            appendTeletype("Memory not configured — session not saved.\n")
+            appendConversation("Claude: Memory not configured — session not saved.\n\n")
         }
     }
 }
