@@ -16,6 +16,7 @@ struct TerminalView: View {
     @State var showingLoginPrompt = false
     @State var showingWakeUpConfirm = false
     @State var showingSafeExitConfirm = false
+    @State var isShuttingDown = false  // Safe Exit state: waiting for tomorrow's plans
 
     // Top pane — production output (documents, files, previews)
     @State var productionText = ""
@@ -187,6 +188,12 @@ struct TerminalView: View {
 
         // Echo input to conversation
         appendConversation("You: \(input)\n\n")
+
+        // If shutting down, this input is tomorrow's plans
+        if isShuttingDown {
+            completeSafeExit(tomorrowsPlans: input)
+            return
+        }
 
         // Handle commands
         if input.hasPrefix("/") {
@@ -360,28 +367,64 @@ struct TerminalView: View {
     }
 
     private func runSafeExit() {
-        appendConversation("--- Safe Exit Routine ---\n")
-
-        if memory.isConfigured {
-            if let sessionFolder = memory.currentSessionFolder() {
-                memory.saveTranscript(claude.messages, to: sessionFolder)
-                appendConversation("Transcript saved to \(sessionFolder.lastPathComponent)/\n")
-            }
-
-            if let chatPath = memory.chatHistoryPath {
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyy MMM dd HHmm"
-                let entry = "\n### [\(formatter.string(from: .now))] Session ended\n- \(claude.messages.count) messages exchanged\n"
-                if var existing = memory.readFile(chatPath) {
-                    existing += entry
-                    memory.writeFile(chatPath, content: existing)
-                }
-                appendConversation("Chat-History updated.\n")
-            }
-
-            appendConversation("Session saved. Safe to close.\n\n")
-        } else {
+        guard memory.isConfigured else {
             appendConversation("Claude: Memory not configured — session not saved.\n\n")
+            return
         }
+
+        appendConversation("--- Safe Exit Routine ---\n\n")
+        appendConversation("Claude: What are your plans for tomorrow?\n\n")
+        isShuttingDown = true
+    }
+
+    private func completeSafeExit(tomorrowsPlans: String) {
+        isShuttingDown = false
+
+        // Save transcript to session folder
+        if let sessionFolder = memory.currentSessionFolder() {
+            memory.saveTranscript(claude.messages, to: sessionFolder)
+            appendConversation("Transcript saved to \(sessionFolder.lastPathComponent)/\n")
+        }
+
+        // Update Chat-History
+        if let chatPath = memory.chatHistoryPath {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy MMM dd HHmm"
+            let entry = "\n### [\(formatter.string(from: .now))] Session ended\n- \(claude.messages.count) messages exchanged\n"
+            if var existing = memory.readFile(chatPath) {
+                existing += entry
+                memory.writeFile(chatPath, content: existing)
+            }
+            appendConversation("Chat-History updated.\n")
+        }
+
+        // Write MORNING-NOTES with tomorrow's plans
+        if let morningPath = memory.morningNotesPath {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy MMM dd (EEEE)"
+            let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: .now) ?? .now
+            let dateString = formatter.string(from: tomorrow)
+
+            var notes = "# Morning Notes — \(dateString)\n\n"
+            notes += "## Plans for Today\n\n"
+            notes += tomorrowsPlans + "\n\n"
+
+            // Add active session summary
+            notes += "## Previous Session Summary\n\n"
+            notes += "- \(claude.messages.count) messages exchanged\n"
+
+            let sessionFormatter = DateFormatter()
+            sessionFormatter.dateFormat = "yyyy MMM dd HHmm"
+            notes += "- Session ended: \(sessionFormatter.string(from: .now))\n"
+
+            memory.writeFile(morningPath, content: notes)
+            appendConversation("MORNING-NOTES written for tomorrow.\n")
+
+            // Show the notes in production pane
+            productionTitle = "MORNING-NOTES.md"
+            setProduction(notes)
+        }
+
+        appendConversation("\nSession saved. Safe to close.\n\n")
     }
 }
